@@ -20,6 +20,9 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
   .charts{padding:6px}
   .lbl{font-size:11px;color:var(--mute);padding:2px 6px}
+  #split{height:10px;cursor:row-resize;background:var(--line);border-radius:4px;margin:4px 0;position:relative}
+  #split:hover,#split.drag{background:#3a4658}
+  #split::after{content:"";position:absolute;left:50%;top:4px;width:40px;height:2px;margin-left:-20px;background:var(--mute);border-radius:2px}
   #verdict{font-size:28px;font-weight:700;margin:2px 0}
   .buy{color:var(--up)}.sell{color:var(--down)}.neutral{color:var(--warn)}
   .bar{height:8px;background:var(--line);border-radius:4px;position:relative;margin:8px 0 12px}
@@ -44,14 +47,15 @@
   <label><button id="tgSt" class="on">Supertrend</button></label>
   <label><button id="tgVwap">VWAP</button></label>
   <label><button id="tgLv" class="on">S/R + Targets</button></label>
+  <label><button id="btnFit" title="Re-fit price scale to the candles">Auto-fit</button></label>
   <span id="conn">connecting…</span>
   <span id="price">–</span>
 </header>
 <main>
   <div class="card charts">
     <div class="lbl" id="lblMain"></div><div id="cMain"></div>
-    <div class="lbl">RSI (14)</div><div id="cRsi"></div>
-    <div class="lbl">MACD (12, 26, 9)</div><div id="cMacd"></div>
+    <div id="split" title="Drag up/down to resize RSI"></div>
+    <div class="lbl">RSI (14) · drag to pan, wheel to zoom, drag the bar above to resize</div><div id="cRsi"></div>
   </div>
   <div class="side">
     <div class="card">
@@ -232,26 +236,72 @@ const label=s=>s>=STRONG_T?['STRONG BUY','buy']:s>=BUY_T?['BUY','buy']:s<=-STRON
 const theme={layout:{background:{color:'#161b22'},textColor:'#8b95a5'},
   grid:{vertLines:{color:'#20262f'},horzLines:{color:'#20262f'}},
   rightPriceScale:{borderColor:'#262d38'},timeScale:{borderColor:'#262d38',timeVisible:true,secondsVisible:false},
-  crosshair:{mode:0}};
+  crosshair:{mode:0},
+  handleScroll:{mouseWheel:true,pressedMouseMove:true,horzTouchDrag:true,vertTouchDrag:true},
+  handleScale:{axisPressedMouseMove:{time:true,price:true},axisDoubleClickReset:true,mouseWheel:true,pinch:true}};
 const mk=(id,h)=>LightweightCharts.createChart(document.getElementById(id),{...theme,height:h,width:document.getElementById(id).clientWidth||800});
-const chMain=mk('cMain',440), chRsi=mk('cRsi',130), chMacd=mk('cMacd',150);
-const sCandle=chMain.addCandlestickSeries({upColor:'#26a69a',downColor:'#ef5350',borderVisible:false,wickUpColor:'#26a69a',wickDownColor:'#ef5350'});
+let rsiH=110;
+const mainH=()=>Math.max(420,innerHeight-rsiH-170);
+const chMain=mk('cMain',mainH()), chRsi=mk('cRsi',rsiH);
+// drag the divider to resize RSI vs price chart
+{const sp=document.getElementById('split');
+ sp.addEventListener('mousedown',e=>{e.preventDefault();sp.classList.add('drag');
+   const y0=e.clientY,r0=rsiH,m0=mainH();
+   const mv=ev=>{rsiH=Math.max(60,Math.min(450,r0-(ev.clientY-y0)));
+     chRsi.applyOptions({height:rsiH});chMain.applyOptions({height:Math.max(250,m0+(r0-rsiH))});};
+   const up=()=>{sp.classList.remove('drag');removeEventListener('mousemove',mv);removeEventListener('mouseup',up);};
+   addEventListener('mousemove',mv);addEventListener('mouseup',up);});}
+// drag the chart in any direction: turn price autoscale off as soon as the user grabs it
+// Vertical zoom: wheel while the cursor is over the right-hand price axis stretches the price range
+// around the cursor (candles get taller). We feed our own price range to the chart through
+// autoscaleInfoProvider; only the primary series reports it, the others report nothing.
+function makeVZoom(chart,el){
+  const st={vr:null,series:null};
+  st.prov=primary=>orig=>st.vr?(primary?{priceRange:{minValue:st.vr.min,maxValue:st.vr.max}}:null):orig();
+  st.refit=()=>{const ps=chart.priceScale('right');ps.applyOptions({autoScale:false});ps.applyOptions({autoScale:true});};
+  st.reset=()=>{st.vr=null;st.refit();};
+  el.addEventListener('wheel',e=>{
+    if(!st.series)return;
+    const rect=el.getBoundingClientRect(),axisW=(chart.priceScale('right').width&&chart.priceScale('right').width())||70;
+    if(e.clientX<rect.right-axisW)return;            // not over the axis: normal horizontal zoom
+    e.preventDefault();e.stopPropagation();
+    const H=el.clientHeight-(chart.timeScale().height?chart.timeScale().height():28),y=Math.min(Math.max(e.clientY-rect.top,0),H);
+    const top=st.series.coordinateToPrice(0),bot=st.series.coordinateToPrice(H),p=st.series.coordinateToPrice(y);
+    if(top==null||bot==null||p==null)return;
+    const f=e.deltaY<0?0.85:1/0.85;                  // wheel up = zoom in
+    const T=p+(top-p)*f,B=p-(p-bot)*f,D=T-B,m=chart.priceScale('right').options().scaleMargins||{top:.2,bottom:.1};
+    // the chart pads the provided range by scaleMargins, so shrink it to make the visible range exactly [B,T]
+    st.vr={min:B+m.bottom*D,max:T-m.top*D};
+    st.refit();
+  },{capture:true,passive:false});
+  return st;
+}
+const vzMain=makeVZoom(chMain,document.getElementById('cMain')), vzRsi=makeVZoom(chRsi,document.getElementById('cRsi'));
+const autoFit=on=>{if(on){vzMain.reset();}else chMain.priceScale('right').applyOptions({autoScale:false});};
+document.getElementById('cMain').addEventListener('mousedown',()=>autoFit(false),true);
+document.getElementById('cMain').addEventListener('touchstart',()=>autoFit(false),{passive:true,capture:true});
+// same for RSI: grab it and it can be dragged up/down
+const rsiFit=on=>{if(on){vzRsi.reset();}else chRsi.priceScale('right').applyOptions({autoScale:false});};
+document.getElementById('cRsi').addEventListener('mousedown',()=>rsiFit(false),true);
+document.getElementById('cRsi').addEventListener('touchstart',()=>rsiFit(false),{passive:true,capture:true});
+const sCandle=chMain.addCandlestickSeries({upColor:'#26a69a',downColor:'#ef5350',borderVisible:false,wickUpColor:'#26a69a',wickDownColor:'#ef5350',autoscaleInfoProvider:vzMain.prov(true)});
+vzMain.series=sCandle;
 const sVol=chMain.addHistogramSeries({priceScaleId:'vol',priceFormat:{type:'volume'}});
 chMain.priceScale('vol').applyOptions({scaleMargins:{top:.85,bottom:0}});
-const line=(ch,color,w=1,extra={})=>ch.addLineSeries({color,lineWidth:w,priceLineVisible:false,lastValueVisible:false,...extra});
+const line=(ch,color,w=1,extra={})=>ch.addLineSeries({color,lineWidth:w,priceLineVisible:false,lastValueVisible:false,
+  autoscaleInfoProvider:ch===chMain?vzMain.prov(false):ch===chRsi?vzRsi.prov(true):undefined,...extra});
 const sE20=line(chMain,'#e0b341'), sE50=line(chMain,'#4aa3ff'), sE200=line(chMain,'#c77dff',2);
 const sST=line(chMain,'#26a69a',2), sVw=line(chMain,'#ff9f43',1,{lineStyle:2,visible:false});
 const sBu=line(chMain,'#5b6b82'), sBm=line(chMain,'#3a4658'), sBl=line(chMain,'#5b6b82');
 const sRsi=line(chRsi,'#c77dff',2,{lastValueVisible:true});
+vzRsi.series=sRsi;
 [70,30].forEach(p=>sRsi.createPriceLine({price:p,color:'#4a5568',lineStyle:2,lineWidth:1,axisLabelVisible:false}));
-const sHist=chMacd.addHistogramSeries({priceLineVisible:false,lastValueVisible:false});
-const sMacd=line(chMacd,'#4aa3ff'), sSig=line(chMacd,'#e0b341');
 
 // sync time scales
-const charts=[chMain,chRsi,chMacd]; let syncing=false;
+const charts=[chMain,chRsi]; let syncing=false;
 charts.forEach(src=>src.timeScale().subscribeVisibleLogicalRangeChange(r=>{
   if(syncing||!r)return;syncing=true;charts.forEach(o=>o!==src&&o.timeScale().setVisibleLogicalRange(r));syncing=false;}));
-addEventListener('resize',()=>charts.forEach(ch=>ch.applyOptions({width:ch.chartElement().parentElement.clientWidth})));
+addEventListener('resize',()=>{charts.forEach(ch=>ch.applyOptions({width:ch.chartElement().parentElement.clientWidth}));chMain.applyOptions({height:mainH()});chRsi.applyOptions({height:rsiH});});
 
 const pts=(cs,arr,f=x=>x)=>cs.map((c,i)=>arr[i]==null?null:{time:c.time,value:f(arr[i])}).filter(Boolean);
 
@@ -264,8 +314,6 @@ function renderAll(){
   sST.setData(cs.map((c,i)=>ind.st[i]?{time:c.time,value:ind.st[i].v,color:ind.st[i].dir>0?'#26a69a':'#ef5350'}:null).filter(Boolean));
   sVw.setData(pts(cs,ind.vwap));
   sRsi.setData(pts(cs,ind.rsi));
-  sHist.setData(cs.map((c,i)=>ind.mc.h[i]==null?null:{time:c.time,value:ind.mc.h[i],color:ind.mc.h[i]>=0?'#26a69a':'#ef5350'}).filter(Boolean));
-  sMacd.setData(pts(cs,ind.mc.m)); sSig.setData(pts(cs,ind.mc.sig));
   markers(); panel();
 }
 function markers(){
@@ -343,7 +391,7 @@ async function load(){
   const conn=document.getElementById('conn');conn.textContent='loading…';
   try{ candles=await klines(symbol,tf); }catch(e){conn.textContent='data error: '+e.message;return;}
   document.getElementById('lblMain').textContent=`${symbol} · ${tf}   (EMA20 yellow · EMA50 blue · EMA200 purple)`;
-  lastCat=null; lastPx=null; renderAll(); {const sc=score(ind,candles,candles.length-1);lastCat=sc>=BUY_T?'buy':sc<=-BUY_T?'sell':'neutral';} charts.forEach(c=>c.timeScale().scrollToRealTime&&0);
+  autoFit(true); rsiFit(true); lastCat=null; lastPx=null; renderAll(); {const sc=score(ind,candles,candles.length-1);lastCat=sc>=BUY_T?'buy':sc<=-BUY_T?'sell':'neutral';} charts.forEach(c=>c.timeScale().scrollToRealTime&&0);
   chMain.timeScale().setVisibleLogicalRange({from:candles.length-120,to:candles.length+5});
   connect(); mtf();
   htf=null; {const s0=symbol,t0=tf; loadHtf(s0).then(h=>{if(s0===symbol&&t0===tf){htf=h;panel();}}).catch(()=>{});}
@@ -365,9 +413,8 @@ function connect(){
     const u=(s,arr,f=x=>x)=>arr[i]!=null&&s.update({time:c.time,value:f(arr[i])});
     if(ind.st[i])sST.update({time:c.time,value:ind.st[i].v,color:ind.st[i].dir>0?'#26a69a':'#ef5350'});
     u(sVw,ind.vwap);
-    u(sE20,ind.e20);u(sE50,ind.e50);u(sE200,ind.e200);u(sRsi,ind.rsi);u(sMacd,ind.mc.m);u(sSig,ind.mc.sig);
+    u(sE20,ind.e20);u(sE50,ind.e50);u(sE200,ind.e200);u(sRsi,ind.rsi);
     u(sBu,ind.bb,b=>b.up);u(sBm,ind.bb,b=>b.mid);u(sBl,ind.bb,b=>b.lo);
-    if(ind.mc.h[i]!=null)sHist.update({time:c.time,value:ind.mc.h[i],color:ind.mc.h[i]>=0?'#26a69a':'#ef5350'});
     markers(); panel();
     checkPriceAlert(c.close);
     if(k.x)checkSignalAlert(i);
@@ -528,6 +575,7 @@ TFS.forEach(t=>{const b=document.createElement('button');b.textContent=t;b.class
   tfEl.appendChild(b);tfEl.appendChild(document.createTextNode(' '));});
 const toggle=(id,series)=>{const b=document.getElementById(id);b.onclick=()=>{
   const on=b.classList.toggle('on');series.forEach(s=>s.applyOptions({visible:on}))}};
+document.getElementById('btnFit').onclick=()=>{autoFit(true);rsiFit(true);chMain.timeScale().setVisibleLogicalRange({from:candles.length-120,to:candles.length+5});};
 document.getElementById('tgLv').onclick=e=>{showLv=e.target.classList.toggle('on');panel();};
 toggle('tgSt',[sST]);toggle('tgVwap',[sVw]);toggle('tgBands',[sBu,sBm,sBl]);toggle('tgEma',[sE20,sE50,sE200]);
 load();
