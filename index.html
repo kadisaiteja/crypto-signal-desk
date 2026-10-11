@@ -127,11 +127,11 @@
 <script>
 const REST = 'https://data-api.binance.vision/api/v3';
 const WS = 'wss://data-stream.binance.vision/ws';
-const FUT = new Set(['NVDAUSDT']);
+const FUT = new Set(['NVDAUSDT','HYPEUSDT']);
 const restBase = sym => FUT.has(sym) ? 'https://fapi.binance.com/fapi/v1' : REST;
 const wsBase = sym => FUT.has(sym) ? 'wss://fstream.binance.com/ws' : WS;
-const nice = s => s==='NVDAUSDT' ? 'NVDA (stock perp)' : s.replace('USDT','/USDT');
-const SYMBOLS = ['NVDAUSDT','BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','LINKUSDT'];
+const nice = s => s==='NVDAUSDT' ? 'NVDA (stock perp)' : s==='HYPEUSDT' ? 'HYPE (Hyperliquid, perp)' : s.replace('USDT','/USDT');
+const SYMBOLS = ['NVDAUSDT','HYPEUSDT','BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','LINKUSDT'];
 const TFS = ['5m','15m','1h','4h','1d'];
 const BUY_T = 0.3, STRONG_T = 0.6;
 const store={get:k=>{try{return localStorage.getItem(k)}catch{return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch{}}};
@@ -654,7 +654,7 @@ async function backtestAll(){
   for(const sym of SYMBOLS){
     try{const cs=await klines(sym,tf,1000),hh=await loadHtf(sym),I=compute(cs);
       const a=runBT(cs,I,hh,o),b=runPB(cs,I,hh,o);
-      rows.push({s:nice(sym).replace(' (stock perp)',''),a,b});fs+=a.ret;us+=b.ret;bs+=a.bh;if(b.ret>a.ret)beat++;
+      rows.push({s:nice(sym).replace(/ \(.*\)$/,''),a,b});fs+=a.ret;us+=b.ret;bs+=a.bh;if(b.ret>a.ret)beat++;
       pbTr+=b.n;pbWin+=Math.round((b.win||0)*b.n);draw(false);}
     catch(e){}
   }
