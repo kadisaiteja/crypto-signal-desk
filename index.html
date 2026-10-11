@@ -60,6 +60,13 @@
     <div class="lbl">RSI (14) · drag to pan, wheel to zoom, drag the bar above to resize</div><div id="cRsi"></div>
   </div>
   <div class="side">
+    <div class="card" id="finalCard">
+      <h3>Final indication</h3>
+      <div id="fVerdict" class="neutral" style="font-size:30px;font-weight:800;line-height:1.1">–</div>
+      <div id="fWhy" class="note" style="margin:4px 0 8px;font-size:12px"></div>
+      <table id="final"></table>
+      <div class="note">Combines the three layers: technical score (40%), buy/sell pressure (30%) and derivatives context (30%). A call needs the technical trigger plus confirmation and no layer against it, and the setup grade must be A or B. Backtests found no proven edge, so use it as a checklist, size small and always use the stop. Not financial advice.</div>
+    </div>
     <div class="card">
       <h3>Signal</h3>
       <div id="verdict">–</div>
@@ -75,6 +82,13 @@
       <div id="pNote" class="note" style="margin:0 0 6px"></div>
       <table id="press"></table>
       <div class="note">Aggressive buy vs sell volume from Binance (taker flow), order book depth within 1% of price, and live trades. Cross-checked against the signal above.</div>
+    </div>
+    <div class="card">
+      <h3>Derivatives &amp; market context</h3>
+      <div id="dVerdict" class="neutral" style="font-size:20px;font-weight:700">loading…</div>
+      <div id="dNote" class="note" style="margin:2px 0 6px"></div>
+      <table id="deriv"></table>
+      <div class="note">Binance futures funding, open interest and long/short ratios, plus the BTC trend and the Fear &amp; Greed index. Crowded positioning often reverses, so extremes count against the crowd.</div>
     </div>
     <div class="card">
       <h3>Setup quality</h3>
@@ -391,7 +405,7 @@ function panel(){
   const i=candles.length-1, cs=candles, px=cs[i].close;
   const comps=components(ind,cs,i), s=comps.reduce((a,x)=>a+x.val,0)/comps.length;
   const [txt,cls]=label(s);
-  sigDir=s>=BUY_T?1:s<=-BUY_T?-1:0;
+  sigDir=s>=BUY_T?1:s<=-BUY_T?-1:0; techS=s;
   const v=document.getElementById('verdict'); v.textContent=txt; v.className=cls;
   document.getElementById('needle').style.left=((s+1)/2*100)+'%';
   document.getElementById('scoreTxt').textContent=`Score ${s.toFixed(2)} (−1 sell … +1 buy)`;
@@ -403,7 +417,8 @@ function panel(){
   if(!tg.length)tg=[1.5,3].map(m=>({p:px+dir*risk*m,r:m,pct:risk*m/px*100,why:`${m}R (no chart level in range)`}));
   const sr=drawLevels(txt==='NEUTRAL'?null:{entry:px,stop:px-dir*risk,targets:tg})||srLevels();
   const nr=sr.res[0],ns=sr.sup[0];
-  quality(txt==="NEUTRAL",dir,px,risk,sr,i); sizeCalc(px,risk);
+  plan0={dir,px,stop:px-dir*risk,t:tg[0]};
+  quality(txt==="NEUTRAL",dir,px,risk,sr,i); sizeCalc(px,risk); renderDeriv(); finalVerdict();
   const rows=[['Bias',dir>0?'Long':'Short'],['Entry (last price)',fmt(px)],
     ['Stop (1.5×ATR)',fmt(px-dir*risk)+` (−${(risk/px*100).toFixed(1)}%)`],
     ...tg.map((t,k)=>[`Target ${k+1}`,`<b>${fmt(t.p)}</b> (+${t.pct.toFixed(1)}%, ${t.r.toFixed(1)}R)<br><span class="note">${t.why}</span>`]),
@@ -484,9 +499,129 @@ function renderPressure(){
   else if(sigDir>0&&sc>=.2)note='Pressure agrees with the BUY signal. '+note;
   else if(sigDir<0&&sc<=-.2)note='Pressure agrees with the SELL signal. '+note;
   document.getElementById('pNote').textContent=note;
+  pressS=sc;pressT=txt;finalVerdict();
   el.innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="${r[2]}">${r[1]}</td></tr>`).join('');
 }
 setInterval(renderPressure,2000);
+
+// ---------- final combined indication ----------
+let techS=0,pressS=null,derivS=null,pressT='',derivT='',qPass=null,plan0=null;
+function finalVerdict(){
+  const el=document.getElementById('final');if(!el||!candles.length)return;
+  const cl=(v,k)=>Math.max(-1,Math.min(1,v/k));
+  // [name, score, "lean" threshold, "strong" level, label, weight]
+  const L=[['Technical signal',techS,.3,.6,label(techS)[0],.4],['Buy / sell pressure',pressS,.2,.5,pressT,.3],['Derivatives & context',derivS,.12,.3,derivT,.3]];
+  let wsum=0,F=0,have=0;
+  L.forEach(x=>{if(x[1]==null)return;have++;wsum+=x[5];F+=x[5]*cl(x[1],x[3]);});
+  F=wsum?F/wsum:0;
+  const techD=techS>=.3?1:techS<=-.3?-1:0;
+  let v='WAIT',c='neutral',why='No technical BUY or SELL trigger yet. Wait for one.';
+  if(techD!==0){
+    const d=techD,others=L.slice(1).filter(x=>x[1]!=null);
+    const agree=others.filter(x=>d*x[1]>=x[2]).length,against=others.filter(x=>d*x[1]<=-x[2]).length;
+    const side=d>0?'BUY':'SELL';
+    if(against>0)why=`Technical says ${side}, but ${against} other layer${against>1?'s disagree':' disagrees'}. Skip it.`;
+    else if(agree===0)why=`Technical says ${side}, but pressure and derivatives don't confirm it yet. Wait.`;
+    else if(qPass!=null&&qPass<2)why=`Layers agree on ${side}, but the setup grade is C (higher timeframe, trend strength or room to target fail). Skip.`;
+    else{
+      const strong=have===3&&agree===2&&qPass===3&&d*F>=.5;
+      v=(strong?'STRONG ':'')+side;c=d>0?'buy':'sell';
+      why=`${agree+1} of ${have} layers agree`+(qPass===2?', setup grade B (use half size).':qPass===3?', setup grade A.':'.');
+    }
+  }
+  const fv=document.getElementById('fVerdict');fv.textContent=v;fv.className=c;
+  document.getElementById('fWhy').textContent=why;
+  const cls=(x,t)=>x==null?'neutral':x>=t?'buy':x<=-t?'sell':'neutral';
+  let html=L.map(x=>`<tr><td>${x[0]}</td><td class="${cls(x[1],x[2])}">${x[1]==null?'loading…':x[4]}</td></tr>`).join('');
+  html+=`<tr><td>Setup grade</td><td class="${qPass===3?'buy':qPass===2?'neutral':qPass==null?'neutral':'sell'}">${qPass==null?'no trigger':qPass===3?'A':qPass===2?'B':'C'}</td></tr>`;
+  if((c==='buy'||c==='sell')&&plan0){
+    const p=plan0,t=p.t;
+    html+=`<tr><td>Entry</td><td>${fmt(p.px)}</td></tr><tr><td>Stop</td><td class="sell">${fmt(p.stop)}</td></tr>`
+      +(t?`<tr><td>First target</td><td class="buy">${fmt(t.p)} (+${t.pct.toFixed(1)}%, ${t.r.toFixed(1)}R)</td></tr>`:'')
+      +(c==='sell'?'<tr><td colspan=2 class="note">On spot, SELL means exit or avoid longs. Only short on futures if you know the risks.</td></tr>':'');
+  }
+  el.innerHTML=html;
+}
+
+// ---------- derivatives + market context ----------
+const FAPI='https://fapi.binance.com';
+let deriv=null;
+const jget=async u=>{const r=await fetch(u);if(!r.ok)throw new Error(r.status);return r.json();};
+const okv=r=>r.status==='fulfilled'?r.value:null;
+async function loadDeriv(){
+  const sym=symbol;
+  const [pi,fr,oi,ls,top,tk,fg,btc]=(await Promise.allSettled([
+    jget(`${FAPI}/fapi/v1/premiumIndex?symbol=${sym}`),
+    jget(`${FAPI}/fapi/v1/fundingRate?symbol=${sym}&limit=21`),
+    jget(`${FAPI}/futures/data/openInterestHist?symbol=${sym}&period=1h&limit=25`),
+    jget(`${FAPI}/futures/data/globalLongShortAccountRatio?symbol=${sym}&period=1h&limit=25`),
+    jget(`${FAPI}/futures/data/topLongShortPositionRatio?symbol=${sym}&period=1h&limit=25`),
+    jget(`${FAPI}/fapi/v1/ticker/24hr?symbol=${sym}`),
+    jget('https://api.alternative.me/fng/?limit=2'),
+    sym==='BTCUSDT'?Promise.resolve(null):klines('BTCUSDT','1d',250)])).map(okv);
+  if(sym!==symbol)return;
+  let btcTrend=null;
+  if(btc&&btc.length>200){const c=btc.map(x=>x.close),e50=ema(c,50),e200=ema(c,200),n=c.length-1;
+    btcTrend={dir:c[n]>e50[n]&&e50[n]>e200[n]?1:c[n]<e50[n]&&e50[n]<e200[n]?-1:0,chg7:(c[n]-c[n-7])/c[n-7]};}
+  deriv={sym,pi,fr,oi,ls,top,tk,fg:fg&&fg.data?fg.data:null,btcTrend};
+  renderDeriv();
+}
+function renderDeriv(){
+  const el=document.getElementById('deriv');if(!el||!deriv||deriv.sym!==symbol)return;
+  const D=deriv,rows=[],votes=[],clamp=v=>Math.max(-1,Math.min(1,v));
+  const cls=v=>v>0.15?'buy':v<-0.15?'sell':'neutral',add=(l,t,v)=>rows.push([l,t,cls(v==null?0:v)]);
+  // funding: positive = longs pay shorts (crowded longs), negative = shorts pay longs
+  if(D.pi){
+    const f=+D.pi.lastFundingRate;let hrs=8;
+    if(D.fr&&D.fr.length>1)hrs=Math.max(1,Math.round((D.fr[D.fr.length-1].fundingTime-D.fr[D.fr.length-2].fundingTime)/3.6e6));
+    const f8=f*8/hrs,ann=f*(24/hrs)*365*100;
+    const avg=D.fr&&D.fr.length?D.fr.reduce((a,x)=>a+ +x.fundingRate,0)/D.fr.length*8/hrs:f8;
+    const v=-clamp((f8*0.6+avg*0.4)/0.0004);votes.push(v);
+    add('Funding rate',`${(f*100).toFixed(4)}% / ${hrs}h (${ann.toFixed(0)}% a year) ${f8>0.0003?'· longs crowded':f8<-0.0001?'· shorts crowded':''}`,v);
+    const prem=(+D.pi.markPrice-+D.pi.indexPrice)/+D.pi.indexPrice*100;
+    add('Futures premium',`${prem>=0?'+':''}${prem.toFixed(3)}% vs spot index`,0);
+  }
+  // open interest vs price over 24h
+  if(D.oi&&D.oi.length>2&&D.tk){
+    const a=+D.oi[0].sumOpenInterestValue,b=+D.oi[D.oi.length-1].sumOpenInterestValue,oc=(b-a)/a,pc24=+D.tk.priceChangePercent/100;
+    let v=0,t='';
+    if(Math.abs(oc)<0.01||Math.abs(pc24)<0.005){t='No clear move';}
+    else if(pc24>0&&oc>0){v=.6;t='Price up, OI up: new longs, trend has fuel';}
+    else if(pc24>0&&oc<0){v=.1;t='Price up, OI down: short covering, weak rally';}
+    else if(pc24<0&&oc>0){v=-.6;t='Price down, OI up: new shorts, bearish push';}
+    else{v=-.1;t='Price down, OI down: longs closing out';}
+    votes.push(v);
+    add('Open interest, 24h',`${oc>=0?'+':''}${(oc*100).toFixed(1)}% (price ${pc24>=0?'+':''}${(pc24*100).toFixed(1)}%)`,v);
+    rows.push(['',`<span class="note">${t}</span>`,'neutral']);
+  }
+  // long/short ratios
+  if(D.ls&&D.ls.length){
+    const L=D.ls[D.ls.length-1],r=+L.longShortRatio;
+    const v=r>1.8?-.7:r>1.4?-.3:r<0.8?.6:r<1.0?.2:0;votes.push(v);
+    add('Traders long / short',`${(+L.longAccount*100).toFixed(0)}% / ${(+L.shortAccount*100).toFixed(0)}% of accounts ${r>1.8?'· very crowded long':r<0.8?'· very crowded short':''}`,v);
+  }
+  if(D.top&&D.top.length){
+    const T=D.top[D.top.length-1],r=+T.longShortRatio,v=r>1.3?.2:r<0.8?-.2:0;votes.push(v);
+    add('Top traders (by position)',`${(+T.longAccount*100).toFixed(0)}% long / ${(+T.shortAccount*100).toFixed(0)}% short`,v);
+  }
+  // market context
+  if(D.btcTrend){const v=D.btcTrend.dir*.5;votes.push(v);
+    add('BTC trend (daily)',`${D.btcTrend.dir>0?'Up':D.btcTrend.dir<0?'Down':'Mixed'} (7d ${D.btcTrend.chg7>=0?'+':''}${(D.btcTrend.chg7*100).toFixed(1)}%)`,v);}
+  if(D.fg&&D.fg.length){const x=+D.fg[0].value,v=x<=20?.5:x>=80?-.5:0;votes.push(v);
+    add('Fear & Greed',`${x} · ${D.fg[0].value_classification}${x<=20?' (extreme fear, contrarian buy zone)':x>=80?' (extreme greed, be careful)':''}`,v);}
+  const sc=votes.length?votes.reduce((a,x)=>a+x,0)/votes.length:0;
+  const [txt,c]=sc>=.3?['BULLISH CONTEXT','buy']:sc>=.12?['LEANS BULLISH','buy']:sc<=-.3?['BEARISH CONTEXT','sell']:sc<=-.12?['LEANS BEARISH','sell']:['NEUTRAL','neutral'];
+  const v=document.getElementById('dVerdict');v.textContent=txt;v.className=c;
+  let note='';
+  if(sigDir>0&&sc<=-.12)note='Caution: signal says BUY but the derivatives context is bearish or crowded.';
+  else if(sigDir<0&&sc>=.12)note='Caution: signal says SELL but the derivatives context is bullish.';
+  else if(sigDir>0&&sc>=.12)note='Context supports the BUY signal.';
+  else if(sigDir<0&&sc<=-.12)note='Context supports the SELL signal.';
+  document.getElementById('dNote').textContent=note;
+  derivS=sc;derivT=txt;finalVerdict();
+  el.innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="${r[2]}">${r[1]}</td></tr>`).join('');
+}
+setInterval(()=>{if(candles.length)loadDeriv()},60000);
 
 // ---------- data ----------
 const toC=k=>({time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5],tb:+k[9]||0}); // tb = taker-buy (aggressive buy) volume
@@ -500,7 +635,7 @@ async function load(){
   document.getElementById('lblMain').textContent=`${symbol} · ${tf}   (EMA20 yellow · EMA50 blue · EMA200 purple)`;
   autoFit(true); rsiFit(true); lastCat=null; lastPx=null; renderAll(); {const sc=score(ind,candles,candles.length-1);lastCat=sc>=BUY_T?'buy':sc<=-BUY_T?'sell':'neutral';} charts.forEach(c=>c.timeScale().scrollToRealTime&&0);
   chMain.timeScale().setVisibleLogicalRange({from:candles.length-120,to:candles.length+5});
-  connect(); mtf(); startPressure();
+  connect(); mtf(); pressS=null; derivS=null; startPressure(); deriv=null; loadDeriv();
   htf=null; {const s0=symbol,t0=tf; loadHtf(s0).then(h=>{if(s0===symbol&&t0===tf){htf=h;panel();}}).catch(()=>{});}
 }
 function connect(){
@@ -566,13 +701,13 @@ function htfDirAt(h,barTime,barSecs){
 // ---------- setup quality + position size ----------
 function quality(neutral,dir,px,risk,sr,i){
   const el=document.getElementById('qual');
-  if(neutral){el.innerHTML='<tr><td class="neutral">No BUY/SELL signal right now. Wait for one.</td></tr>';return;}
+  if(neutral){qPass=null;el.innerHTML='<tr><td class="neutral">No BUY/SELL signal right now. Wait for one.</td></tr>';return;}
   const d=htfDirAt(htf,candles[i].time,SECS[tf]),av=ind.adx[i],tg=dir>0?sr.res[0]:sr.sup[0],room=tg?Math.abs(tg.p-px)/risk:null;
   const checks=[
     [`${HTF[tf]} trend is ${d>0?'up':d<0?'down':'mixed'} (need ${dir>0?'up':'down'})`,d===dir],
     [`Trend strength ADX ${av==null?'-':av.toFixed(0)} (need 20+)`,av!=null&&av>=20],
     [room==null?'Clear path to targets':`Room to ${dir>0?'resistance':'support'}: ${room.toFixed(1)}R (need 1.5R+)`,room==null||room>=1.5]];
-  const pass=checks.filter(c=>c[1]).length,g=pass===3?['A','buy','TAKE the trade']:pass===2?['B','neutral','CAUTION: half size']:['C','sell','SKIP this one'];
+  const pass=checks.filter(c=>c[1]).length;qPass=pass;const g=pass===3?['A','buy','TAKE the trade']:pass===2?['B','neutral','CAUTION: half size']:['C','sell','SKIP this one'];
   el.innerHTML=checks.map(c=>`<tr><td>${c[0]}</td><td class="${c[1]?'buy':'sell'}">${c[1]?'✓':'✗'}</td></tr>`).join('')
     +`<tr><td><b>Grade ${g[0]}</b></td><td class="${g[1]}"><b>${g[2]}</b></td></tr>`;
 }
