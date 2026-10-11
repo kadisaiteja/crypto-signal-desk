@@ -20,6 +20,8 @@
   .card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:12px}
   .charts{padding:6px}
   .lbl{font-size:11px;color:var(--mute);padding:2px 6px}
+  .pbar{display:flex;height:10px;border-radius:5px;overflow:hidden;margin:6px 0 4px}
+  .pbar i{display:block;height:100%}#pBuy{background:var(--up)}#pSell{background:var(--down)}
   #split{height:10px;cursor:row-resize;background:var(--line);border-radius:4px;margin:4px 0;position:relative}
   #split:hover,#split.drag{background:#3a4658}
   #split::after{content:"";position:absolute;left:50%;top:4px;width:40px;height:2px;margin-left:-20px;background:var(--mute);border-radius:2px}
@@ -67,6 +69,14 @@
       <table id="reasons"></table>
     </div>
     <div class="card">
+      <h3>Buy / sell pressure</h3>
+      <div id="pVerdict" class="neutral" style="font-size:20px;font-weight:700">–</div>
+      <div class="pbar"><i id="pBuy" style="width:50%"></i><i id="pSell" style="width:50%"></i></div>
+      <div id="pNote" class="note" style="margin:0 0 6px"></div>
+      <table id="press"></table>
+      <div class="note">Aggressive buy vs sell volume from Binance (taker flow), order book depth within 1% of price, and live trades. Cross-checked against the signal above.</div>
+    </div>
+    <div class="card">
       <h3>Setup quality</h3>
       <table id="qual"></table>
       <div class="note">Only grade A setups have all three edges: higher timeframe agrees, market is trending, and there is room to the target.</div>
@@ -80,7 +90,7 @@
     <div class="card">
       <h3>Trade plan (ATR based)</h3>
       <table id="plan"></table>
-      <div class="note">Stop = 1.5×ATR, targets = 1.5R / 3R. Size the position so a stop-out risks 1–2% of your account.</div>
+      <div class="note">Stop = 1.5×ATR. Targets come from the chart: support/resistance levels, Fibonacci extensions of the recent swing, and the Bollinger band. R = reward divided by risk. Size the position so a stop-out risks 1–2% of your account.</div>
     </div>
     <div class="card">
       <h3>Multi-timeframe</h3>
@@ -91,8 +101,8 @@
       <h3>Backtest (loaded candles)</h3>
       <label class="note">Stop (×ATR) <input id="btStop" type="number" value="3" step="0.5" min="0.5" style="width:60px"></label>
       <label class="note"><input id="btLong" type="checkbox" checked> Long only</label>
-      <label class="note"><input id="btHtf" type="checkbox" checked> Higher-timeframe filter</label>
-      <label class="note"><input id="btAdx" type="checkbox" checked> ADX 20+ filter</label><br>
+      <label class="note"><input id="btHtf" type="checkbox"> Higher-timeframe filter</label>
+      <label class="note"><input id="btAdx" type="checkbox"> ADX 20+ filter</label><br>
       <button id="btRun">Run backtest</button> <button id="btAllRun">Test all coins</button>
       <table id="bt"></table>
       <table id="btAll"></table>
@@ -355,15 +365,33 @@ function drawLevels(plan){
   if(plan){
     add(plan.entry,'#8b95a5','Entry',0);
     add(plan.stop,'#ff6b6b','Stop',0,2);
-    add(plan.t1,'#4aa3ff','Target 1',0);
-    add(plan.t2,'#7bd88f','Target 2',0,2);
+    const col=['#4aa3ff','#7bd88f','#c3e88d'];
+    plan.targets.forEach((t,k)=>add(t.p,col[k]||'#c3e88d',`Target ${k+1} (${t.pct>=0?'+':''}${t.pct.toFixed(1)}%)`,0,k===1?2:1));
   }
   return sr;
+}
+// Targets from the chart itself: next support/resistance levels, Fibonacci extensions of the last
+// 100-candle swing, and the Bollinger band. Keeps the 3 nearest that are at least 0.5R away.
+function chartTargets(dir,px,risk,sr){
+  const cs=candles,n=cs.length,look=cs.slice(-100),hi=Math.max(...look.map(c=>c.high)),lo=Math.min(...look.map(c=>c.low)),rg=hi-lo;
+  const lv=[];
+  (dir>0?sr.res:sr.sup).forEach((l,k)=>lv.push({p:l.p,why:(dir>0?'Resistance R':'Support S')+(k+1)+` (${l.n}x)`}));
+  const fib=dir>0?[[hi+0.272*rg,'Fib 1.272 extension'],[hi+0.618*rg,'Fib 1.618 extension']]:[[lo-0.272*rg,'Fib 1.272 extension'],[lo-0.618*rg,'Fib 1.618 extension']];
+  fib.forEach(f=>lv.push({p:f[0],why:f[1]}));
+  const bb=ind.bb[n-1];if(bb)lv.push({p:dir>0?bb.up:bb.lo,why:'Bollinger band'});
+  const out=[];
+  lv.filter(l=>l.p>0&&dir*(l.p-px)>=0.5*risk).sort((x,y)=>dir*(x.p-y.p)).forEach(l=>{
+    const prev=out[out.length-1];
+    if(prev&&Math.abs(l.p-prev.p)/px<0.003){prev.why+=' + '+l.why;return;}   // merge levels within 0.3%
+    out.push({...l,r:dir*(l.p-px)/risk,pct:dir*(l.p-px)/px*100});   // gain if hit, in % (positive for either direction)
+  });
+  return out.slice(0,3);
 }
 function panel(){
   const i=candles.length-1, cs=candles, px=cs[i].close;
   const comps=components(ind,cs,i), s=comps.reduce((a,x)=>a+x.val,0)/comps.length;
   const [txt,cls]=label(s);
+  sigDir=s>=BUY_T?1:s<=-BUY_T?-1:0;
   const v=document.getElementById('verdict'); v.textContent=txt; v.className=cls;
   document.getElementById('needle').style.left=((s+1)/2*100)+'%';
   document.getElementById('scoreTxt').textContent=`Score ${s.toFixed(2)} (−1 sell … +1 buy)`;
@@ -371,18 +399,97 @@ function panel(){
     `<tr><td>${c.txt}</td><td class="${c.val>.15?'buy':c.val<-.15?'sell':'neutral'}">${c.val>0?'+':''}${c.val.toFixed(1)}</td></tr>`).join('');
   document.getElementById('price').textContent=fmt(px);
   const a=ind.atr[i], dir=s<=-BUY_T?-1:1, risk=1.5*a;
-  const sr=drawLevels(txt==='NEUTRAL'?null:{entry:px,stop:px-dir*risk,t1:px+dir*risk*1.5,t2:px+dir*risk*3})||srLevels();
+  let tg=chartTargets(dir,px,risk,srLevels());
+  if(!tg.length)tg=[1.5,3].map(m=>({p:px+dir*risk*m,r:m,pct:risk*m/px*100,why:`${m}R (no chart level in range)`}));
+  const sr=drawLevels(txt==='NEUTRAL'?null:{entry:px,stop:px-dir*risk,targets:tg})||srLevels();
   const nr=sr.res[0],ns=sr.sup[0];
   quality(txt==="NEUTRAL",dir,px,risk,sr,i); sizeCalc(px,risk);
   const rows=[['Bias',dir>0?'Long':'Short'],['Entry (last price)',fmt(px)],
-    ['Stop',fmt(px-dir*risk)],['Target 1 (1.5R)',fmt(px+dir*risk*1.5)],['Target 2 (3R)',fmt(px+dir*risk*3)],
+    ['Stop (1.5×ATR)',fmt(px-dir*risk)+` (−${(risk/px*100).toFixed(1)}%)`],
+    ...tg.map((t,k)=>[`Target ${k+1}`,`<b>${fmt(t.p)}</b> (+${t.pct.toFixed(1)}%, ${t.r.toFixed(1)}R)<br><span class="note">${t.why}</span>`]),
     ['ATR(14)',fmt(a)],['Nearest support',ns?fmt(ns.p)+` (${ns.n}x)`:'-'],['Nearest resistance',nr?fmt(nr.p)+` (${nr.n}x)`:'-']];
   document.getElementById('plan').innerHTML=(txt==='NEUTRAL'?'<tr><td colspan=2 class="neutral">No clear edge. Levels below are indicative only.</td></tr>':'')
     +rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td></tr>`).join('');
 }
 
+// ---------- buying / selling pressure ----------
+let book=null, flow={}, flowWs=null, bookTimer=null, sigDir=0;
+function startPressure(){
+  book=null; flow={};
+  if(flowWs){flowWs.onclose=null;flowWs.close();}
+  const sym=symbol;
+  const open=()=>{
+    flowWs=new WebSocket(`${wsBase(sym)}/${sym.toLowerCase()}@aggTrade`);
+    // m = true means the buyer was the maker, i.e. the SELLER hit the bid (aggressive sell)
+    flowWs.onmessage=e=>{const t=JSON.parse(e.data),s=Math.floor(t.T/1000),b=flow[s]||(flow[s]={b:0,s:0,n:0});b.n++;if(t.m)b.s+=+t.q;else b.b+=+t.q;};
+    flowWs.onclose=()=>{if(sym===symbol)setTimeout(open,3000)};
+  };
+  open();
+  clearInterval(bookTimer);pollBook(sym);bookTimer=setInterval(()=>pollBook(sym),5000);
+}
+async function pollBook(sym){
+  if(sym!==symbol)return;
+  try{const d=await (await fetch(`${restBase(sym)}/depth?symbol=${sym}&limit=500`)).json();
+    if(sym!==symbol)return;
+    book={bids:d.bids.map(x=>[+x[0],+x[1]]),asks:d.asks.map(x=>[+x[0],+x[1]])};renderPressure();}catch(e){}
+}
+function renderPressure(){
+  const el=document.getElementById('press');if(!el||!candles.length)return;
+  const cs=candles,n=cs.length,px=cs[n-1].close,pts=[],rows=[];
+  const clamp=v=>Math.max(-1,Math.min(1,v)),pct=v=>(v*100).toFixed(0)+'%',sg=v=>(v>=0?'+':'')+(v*100).toFixed(1)+'%';
+  const cls=v=>v>0.05?'buy':v<-0.05?'sell':'neutral';
+  // 1) taker buy share of volume
+  const share=m=>{let b=0,v=0;for(let i=Math.max(0,n-m);i<n;i++){b+=cs[i].tb;v+=cs[i].volume}return v?b/v:0.5;};
+  const last=cs[n-1].volume?cs[n-1].tb/cs[n-1].volume:.5,b5=share(5),b20=share(20);
+  pts.push(clamp((b20-.5)*10),clamp((b5-.5)*10));
+  rows.push(['Buy share, this candle',`${pct(last)} buy / ${pct(1-last)} sell`,cls(last-.5)]);
+  rows.push(['Buy share, last 20 candles',`${pct(b20)} buy / ${pct(1-b20)} sell`,cls(b20-.5)]);
+  // 2) cumulative volume delta and divergence with price
+  const W=Math.min(40,n-1);let cvd=0,tv=0;
+  for(let i=n-W;i<n;i++){cvd+=2*cs[i].tb-cs[i].volume;tv+=cs[i].volume;}
+  const cvdP=tv?cvd/tv:0,priceChg=(px-cs[n-W].close)/cs[n-W].close;
+  pts.push(clamp(cvdP*8));
+  rows.push([`Net delta (CVD), ${W} candles`,`${cvdP>=0?'Buyers ahead':'Sellers ahead'} (${sg(cvdP)} of volume)`,cls(cvdP)]);
+  let warn='';
+  if(priceChg>0.003&&cvdP<-0.02){warn='Bearish divergence: price is rising but sellers dominate volume. Rally may be weak.';rows.push(['Divergence','Bearish','sell']);}
+  else if(priceChg<-0.003&&cvdP>0.02){warn='Bullish divergence: price is falling but buyers are absorbing. Selling may be exhausting.';rows.push(['Divergence','Bullish','buy']);}
+  else rows.push(['Divergence','None','neutral']);
+  // 3) order book within 1% of price
+  if(book){
+    const bids=book.bids.filter(l=>l[0]>=px*0.99),asks=book.asks.filter(l=>l[0]<=px*1.01);
+    const sb=bids.reduce((a,l)=>a+l[1],0),sa=asks.reduce((a,l)=>a+l[1],0),imb=(sb+sa)?(sb-sa)/(sb+sa):0;
+    pts.push(clamp(imb*2));
+    rows.push(['Order book within 1%',`${pct(sb/((sb+sa)||1))} bids / ${pct(sa/((sb+sa)||1))} asks`,cls(imb)]);
+    const big=a=>a.reduce((m,l)=>l[1]>m[1]?l:m,[0,0]);
+    const bw=big(bids),aw=big(asks),avg=(sb+sa)/((bids.length+asks.length)||1);
+    if(bw[1]>5*avg)rows.push(['Biggest bid wall (support)',`${fmt(bw[0])} (${((bw[0]-px)/px*100).toFixed(2)}%)`,'buy']);
+    if(aw[1]>5*avg)rows.push(['Biggest ask wall (resistance)',`${fmt(aw[0])} (+${((aw[0]-px)/px*100).toFixed(2)}%)`,'sell']);
+  }else rows.push(['Order book','loading…','neutral']);
+  // 4) live trade flow (aggressive buys vs sells)
+  const now=Math.floor(Date.now()/1000);let b1=0,s1=0,n1=0,b5m=0,s5=0,n5=0;
+  for(const k in flow){const age=now-k,f=flow[k];if(age>300){delete flow[k];continue;}b5m+=f.b;s5+=f.s;n5+=f.n;if(age<=60){b1+=f.b;s1+=f.s;n1+=f.n;}}
+  const d1=(b1+s1)?(b1-s1)/(b1+s1):0,d5=(b5m+s5)?(b5m-s5)/(b5m+s5):0,MIN=30;   // ignore thin samples
+  if(n1>=MIN)pts.push(clamp(d1*1.5)); if(n5>=MIN)pts.push(clamp(d5*1.5));
+  const fl=(n,d,ok)=>!n?'waiting…':ok?`${pct((1+d)/2)} buying (${sg(d)} net, ${n} trades)`:`too few trades to judge (${n})`;
+  rows.push(['Live trades, last 1 min',fl(n1,d1,n1>=MIN),n1>=MIN?cls(d1):'neutral']);
+  rows.push(['Live trades, last 5 min',fl(n5,d5,n5>=MIN),n5>=MIN?cls(d5):'neutral']);
+  // verdict
+  const sc=pts.reduce((a,x)=>a+x,0)/pts.length;
+  const [txt,c]=sc>=.5?['BUYERS DOMINATE','buy']:sc>=.2?['BUYERS LEAD','buy']:sc<=-.5?['SELLERS DOMINATE','sell']:sc<=-.2?['SELLERS LEAD','sell']:['BALANCED','neutral'];
+  const v=document.getElementById('pVerdict');v.textContent=txt;v.className=c;
+  document.getElementById('pBuy').style.width=pct(b20);document.getElementById('pSell').style.width=pct(1-b20);
+  let note=warn;
+  if(sigDir>0&&sc<=-.2)note='Caution: signal says BUY but sellers are in control. '+note;
+  else if(sigDir<0&&sc>=.2)note='Caution: signal says SELL but buyers are in control. '+note;
+  else if(sigDir>0&&sc>=.2)note='Pressure agrees with the BUY signal. '+note;
+  else if(sigDir<0&&sc<=-.2)note='Pressure agrees with the SELL signal. '+note;
+  document.getElementById('pNote').textContent=note;
+  el.innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="${r[2]}">${r[1]}</td></tr>`).join('');
+}
+setInterval(renderPressure,2000);
+
 // ---------- data ----------
-const toC=k=>({time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5]});
+const toC=k=>({time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5],tb:+k[9]||0}); // tb = taker-buy (aggressive buy) volume
 async function klines(sym,interval,limit=1000){
   const r=await fetch(`${restBase(sym)}/klines?symbol=${sym}&interval=${interval}&limit=${limit}`);
   if(!r.ok)throw new Error('HTTP '+r.status);return (await r.json()).map(toC);
@@ -393,7 +500,7 @@ async function load(){
   document.getElementById('lblMain').textContent=`${symbol} · ${tf}   (EMA20 yellow · EMA50 blue · EMA200 purple)`;
   autoFit(true); rsiFit(true); lastCat=null; lastPx=null; renderAll(); {const sc=score(ind,candles,candles.length-1);lastCat=sc>=BUY_T?'buy':sc<=-BUY_T?'sell':'neutral';} charts.forEach(c=>c.timeScale().scrollToRealTime&&0);
   chMain.timeScale().setVisibleLogicalRange({from:candles.length-120,to:candles.length+5});
-  connect(); mtf();
+  connect(); mtf(); startPressure();
   htf=null; {const s0=symbol,t0=tf; loadHtf(s0).then(h=>{if(s0===symbol&&t0===tf){htf=h;panel();}}).catch(()=>{});}
 }
 function connect(){
@@ -403,7 +510,7 @@ function connect(){
   ws.onopen=()=>{conn.textContent='● live';conn.style.color='#26a69a'};
   ws.onclose=()=>{conn.textContent='reconnecting…';conn.style.color='#e0b341';setTimeout(connect,3000)};
   ws.onmessage=e=>{
-    const k=JSON.parse(e.data).k, c=toC([k.t,k.o,k.h,k.l,k.c,k.v]);
+    const k=JSON.parse(e.data).k, c=toC([k.t,k.o,k.h,k.l,k.c,k.v,0,0,0,k.V]);
     const last=candles[candles.length-1];
     if(c.time===last.time)candles[candles.length-1]=c; else candles.push(c);
     ind=compute(candles);
@@ -499,29 +606,56 @@ function runBT(cs,I,h,o){
   return {n:tr.length,win:tr.length?w.length/tr.length:null,avg:tr.length?sum(tr)/tr.length:null,
     pf:l.length&&sum(l)?sum(w)/-sum(l):null,ret:eq-1,mdd,bh:cs[n-1].close/cs[200].close-1};
 }
+// Pullback strategy: trade WITH a strong trend, enter when price dips to the 50 EMA and bounces.
+// Long: close>EMA200, EMA50>EMA200 and rising, low reaches EMA50 (+0.5 ATR) but close holds above it, green candle.
+// Exit: stop (stopM x ATR), take-profit (2 x stop distance), or close back through the EMA50.
+function runPB(cs,I,h,o){
+  const fee=0.001,n=cs.length,bs=SECS[tf];
+  let pos=0,entry=0,stop=0,tp=0,eq=1,peak=1,mdd=0;const tr=[];
+  const close=px=>{const r=pos*(px-entry)/entry-2*fee;tr.push(r);eq*=1+r;peak=Math.max(peak,eq);mdd=Math.max(mdd,(peak-eq)/peak);pos=0;};
+  for(let i=200;i<n;i++){
+    const c=cs[i],a=I.atr[i],e50=I.e50[i],e200=I.e200[i];
+    if(pos>0){if(c.low<=stop)close(stop);else if(c.high>=tp)close(tp);else if(c.close<e50)close(c.close);}
+    else if(pos<0){if(c.high>=stop)close(stop);else if(c.low<=tp)close(tp);else if(c.close>e50)close(c.close);}
+    if(pos||!a||e50==null||e200==null||I.e50[i-5]==null)continue;
+    const p=cs[i-1],up=c.close>e200&&e50>e200&&e50>I.e50[i-5],dn=c.close<e200&&e50<e200&&e50<I.e50[i-5];
+    const ls=up&&c.low<=e50+0.5*a&&c.close>e50&&c.close>c.open&&c.close>p.close;
+    const ss=dn&&c.high>=e50-0.5*a&&c.close<e50&&c.close<c.open&&c.close<p.close;
+    const d=ls?1:(ss&&!o.longOnly)?-1:0;
+    if(!d)continue;
+    if(o.useHtf&&htfDirAt(h,c.time,bs)!==d)continue;
+    if(o.useAdx&&!(I.adx[i]!=null&&I.adx[i]>=20))continue;
+    pos=d;entry=c.close;stop=entry-d*o.stopM*a;tp=entry+d*2*o.stopM*a;
+  }
+  if(pos)close(cs[n-1].close);
+  const w=tr.filter(x=>x>0),l=tr.filter(x=>x<=0),sum=a=>a.reduce((x,y)=>x+y,0);
+  return {n:tr.length,win:tr.length?w.length/tr.length:null,avg:tr.length?sum(tr)/tr.length:null,
+    pf:l.length&&sum(l)?sum(w)/-sum(l):null,ret:eq-1,mdd,bh:cs[n-1].close/cs[200].close-1};
+}
 const btOpts=()=>({stopM:parseFloat(document.getElementById('btStop').value)||3,longOnly:document.getElementById('btLong').checked,
   useHtf:document.getElementById('btHtf').checked,useAdx:document.getElementById('btAdx').checked});
 const pc=x=>x==null?'-':(x*100).toFixed(1)+'%';
 function backtest(){
-  const o=btOpts(),a=runBT(candles,ind,htf,o),b=runBT(candles,ind,htf,{...o,useHtf:false,useAdx:false});
+  const o=btOpts(),a=runBT(candles,ind,htf,o),b=runPB(candles,ind,htf,o);
   const rows=[['Trades',a.n,b.n],['Win rate',pc(a.win),pc(b.win)],['Avg trade',pc(a.avg),pc(b.avg)],
     ['Profit factor',a.pf==null?'-':a.pf.toFixed(2),b.pf==null?'-':b.pf.toFixed(2)],['Return',pc(a.ret),pc(b.ret)],
     ['Max drawdown',pc(a.mdd),pc(b.mdd)],['Buy & hold',pc(a.bh),pc(a.bh)]];
-  document.getElementById('bt').innerHTML='<tr><td></td><td>With filters</td><td>No filters</td></tr>'
+  document.getElementById('bt').innerHTML='<tr><td></td><td>Score</td><td>Pullback</td></tr>'
     +rows.map(r=>`<tr><td>${r[0]}</td><td>${r[1]}</td><td>${r[2]}</td></tr>`).join('');
 }
 async function backtestAll(){
-  const el=document.getElementById('btAll'),o=btOpts(),rows=[];let fs=0,us=0,bs=0,beat=0;
-  const draw=(done)=>{el.innerHTML='<tr><td>Coin</td><td>Filters</td><td>No filt.</td><td>Hold</td></tr>'+rows.map(r=>
-    `<tr><td>${r.s}</td><td class="${r.a.ret>=0?'buy':'sell'}">${pc(r.a.ret)} (${r.a.n})</td><td>${pc(r.b.ret)}</td><td>${pc(r.a.bh)}</td></tr>`).join('')
+  const el=document.getElementById('btAll'),o=btOpts(),rows=[];let fs=0,us=0,bs=0,beat=0,pbTr=0,pbWin=0;
+  const draw=(done)=>{el.innerHTML='<tr><td>Coin</td><td>Score</td><td>Pullback</td><td>Hold</td></tr>'+rows.map(r=>
+    `<tr><td>${r.s}</td><td class="${r.a.ret>=0?'buy':'sell'}">${pc(r.a.ret)} (${r.a.n})</td><td class="${r.b.ret>=0?'buy':'sell'}">${pc(r.b.ret)} (${r.b.n})</td><td>${pc(r.a.bh)}</td></tr>`).join('')
     +(rows.length?`<tr><td><b>${done?'Average':'So far'}</b></td><td><b>${pc(fs/rows.length)}</b></td><td><b>${pc(us/rows.length)}</b></td><td><b>${pc(bs/rows.length)}</b></td></tr>`
-    +`<tr><td colspan=4 class="note">Filters beat no-filters on ${beat} of ${rows.length}; beat buy & hold on ${rows.filter(r=>r.a.ret>r.a.bh).length}.</td></tr>`:'')
+    +`<tr><td colspan=4 class="note">Pullback beat Score on ${beat} of ${rows.length}; beat buy & hold on ${rows.filter(r=>r.b.ret>r.a.bh).length}. Pullback win rate (all trades): ${pc(pbWin/Math.max(1,pbTr))}.</td></tr>`:'')
     +(done?'':'<tr><td colspan=4 class="note">Running…</td></tr>');};
   draw(false);
   for(const sym of SYMBOLS){
     try{const cs=await klines(sym,tf,1000),hh=await loadHtf(sym),I=compute(cs);
-      const a=runBT(cs,I,hh,o),b=runBT(cs,I,hh,{...o,useHtf:false,useAdx:false});
-      rows.push({s:nice(sym).replace(' (stock perp)',''),a,b});fs+=a.ret;us+=b.ret;bs+=a.bh;if(a.ret>b.ret)beat++;draw(false);}
+      const a=runBT(cs,I,hh,o),b=runPB(cs,I,hh,o);
+      rows.push({s:nice(sym).replace(' (stock perp)',''),a,b});fs+=a.ret;us+=b.ret;bs+=a.bh;if(b.ret>a.ret)beat++;
+      pbTr+=b.n;pbWin+=Math.round((b.win||0)*b.n);draw(false);}
     catch(e){}
   }
   draw(true);
