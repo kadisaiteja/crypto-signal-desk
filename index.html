@@ -142,10 +142,13 @@
 const REST = 'https://data-api.binance.vision/api/v3';
 const WS = 'wss://data-stream.binance.vision/ws';
 const FUT = new Set(['NVDAUSDT','HYPEUSDT']);
+// On-chain tokens with no exchange listing: candles from GeckoTerminal, trade counts/liquidity from DexScreener
+const DEX = {WHUF_DEX:{net:'base',pool:'0x7735599c022c840da8bb5c2caa739a8d839aa299',token:'0xeeee77bC7e82c0d4166d52F58239D4c5Bf41eeee',name:'WHUF (Whuffie / Ethos, Base DEX)'}};
+const isDex = s => !!DEX[s];
 const restBase = sym => FUT.has(sym) ? 'https://fapi.binance.com/fapi/v1' : REST;
 const wsBase = sym => FUT.has(sym) ? 'wss://fstream.binance.com/ws' : WS;
-const nice = s => s==='NVDAUSDT' ? 'NVDA (stock perp)' : s==='HYPEUSDT' ? 'HYPE (Hyperliquid, perp)' : s.replace('USDT','/USDT');
-const SYMBOLS = ['NVDAUSDT','HYPEUSDT','BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','LINKUSDT'];
+const nice = s => DEX[s] ? DEX[s].name : s==='NVDAUSDT' ? 'NVDA (stock perp)' : s==='HYPEUSDT' ? 'HYPE (Hyperliquid, perp)' : s.replace('USDT','/USDT');
+const SYMBOLS = ['NVDAUSDT','HYPEUSDT','WHUF_DEX','BTCUSDT','ETHUSDT','SOLUSDT','BNBUSDT','XRPUSDT','ADAUSDT','DOGEUSDT','AVAXUSDT','LINKUSDT'];
 const TFS = ['5m','15m','1h','4h','1d'];
 const BUY_T = 0.3, STRONG_T = 0.6;
 const store={get:k=>{try{return localStorage.getItem(k)}catch{return null}},set:(k,v)=>{try{localStorage.setItem(k,v)}catch{}}};
@@ -403,6 +406,12 @@ function chartTargets(dir,px,risk,sr){
 }
 function panel(){
   const i=candles.length-1, cs=candles, px=cs[i].close;
+  if(ind.atr[i]==null||!ind.bb[i]){   // young tokens / short timeframes may not have enough candles yet
+    const v=document.getElementById('verdict');v.textContent='Not enough history';v.className='neutral';
+    const f=document.getElementById('fVerdict');f.textContent='WAIT';f.className='neutral';
+    document.getElementById('fWhy').textContent=`Only ${cs.length} candles on this timeframe, too few for the indicators. Try a shorter timeframe.`;
+    document.getElementById('price').textContent=fmt(px);return;
+  }
   const comps=components(ind,cs,i), s=comps.reduce((a,x)=>a+x.val,0)/comps.length;
   const [txt,cls]=label(s);
   sigDir=s>=BUY_T?1:s<=-BUY_T?-1:0; techS=s;
@@ -432,6 +441,9 @@ let book=null, flow={}, flowWs=null, bookTimer=null, sigDir=0;
 function startPressure(){
   book=null; flow={};
   if(flowWs){flowWs.onclose=null;flowWs.close();}
+  if(isDex(symbol)){   // no order book / taker stream: use DexScreener trade counts, refreshed every 30s
+    clearInterval(bookTimer);dexInfo=null;const s0=symbol;pollDex(s0);bookTimer=setInterval(()=>pollDex(s0),30000);return;
+  }
   const sym=symbol;
   const open=()=>{
     flowWs=new WebSocket(`${wsBase(sym)}/${sym.toLowerCase()}@aggTrade`);
@@ -448,8 +460,45 @@ async function pollBook(sym){
     if(sym!==symbol)return;
     book={bids:d.bids.map(x=>[+x[0],+x[1]]),asks:d.asks.map(x=>[+x[0],+x[1]])};renderPressure();}catch(e){}
 }
+let dexInfo=null;
+async function pollDex(sym){
+  if(sym!==symbol)return;
+  try{const d=DEX[sym],j=await jget(`https://api.dexscreener.com/latest/dex/pairs/${d.net}/${d.pool}`);
+    if(sym!==symbol)return;dexInfo=j.pairs&&j.pairs[0]||null;renderPressure();if(deriv&&deriv.dex)renderDeriv();}catch(e){}
+}
+const fmtK=v=>v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(0)+'K':Number(v).toFixed(0);
+// pressure for DEX tokens: buys vs sells (trade counts) over several windows
+function renderDexPressure(){
+  const el=document.getElementById('press'),D=dexInfo,pts=[],rows=[];
+  const clamp=v=>Math.max(-1,Math.min(1,v)),cls=v=>v>0.05?'buy':v<-0.05?'sell':'neutral';
+  if(!D){el.innerHTML='<tr><td>Loading DEX data…</td><td></td></tr>';return;}
+  const tx=D.txns||{};let share6=.5;
+  [['5 min','m5',0],['1 hour','h1',10],['6 hours','h6',20],['24 hours','h24',40]].forEach(([lab,k,min])=>{
+    const t=tx[k];if(!t)return;const n=t.buys+t.sells,imb=n?(t.buys-t.sells)/n:0;
+    if(k==='h6'&&n)share6=t.buys/n;
+    if(min&&n>=min)pts.push(clamp(imb*2.5));
+    rows.push([`Trades, ${lab}`,n?`${t.buys} buys / ${t.sells} sells (${imb>=0?'+':''}${(imb*100).toFixed(0)}%)`:'no trades',min&&n>=min?cls(imb):'neutral']);
+  });
+  const pcg=D.priceChange||{};
+  if(pcg.h24!=null)rows.push(['Price change 1h / 6h / 24h',`${pcg.h1>=0?'+':''}${pcg.h1}% / ${pcg.h6>=0?'+':''}${pcg.h6}% / ${pcg.h24>=0?'+':''}${pcg.h24}%`,cls(pcg.h6/10)]);
+  const sc=pts.length?pts.reduce((a,x)=>a+x,0)/pts.length:0;
+  const [txt,c]=!pts.length?['NOT ENOUGH TRADES','neutral']:sc>=.5?['BUYERS DOMINATE','buy']:sc>=.2?['BUYERS LEAD','buy']:sc<=-.5?['SELLERS DOMINATE','sell']:sc<=-.2?['SELLERS LEAD','sell']:['BALANCED','neutral'];
+  const v=document.getElementById('pVerdict');v.textContent=txt;v.className=c;
+  document.getElementById('pBuy').style.width=(share6*100).toFixed(0)+'%';document.getElementById('pSell').style.width=((1-share6)*100).toFixed(0)+'%';
+  let note='Counts trades, not dollar size: many small buys can hide big sells. ';
+  if(pts.length){
+    if(sigDir>0&&sc<=-.2)note+='Caution: signal says BUY but sellers lead.';
+    else if(sigDir<0&&sc>=.2)note+='Caution: signal says SELL but buyers lead.';
+    else if(sigDir>0&&sc>=.2)note+='Pressure agrees with the BUY signal.';
+    else if(sigDir<0&&sc<=-.2)note+='Pressure agrees with the SELL signal.';
+  }
+  document.getElementById('pNote').textContent=note;
+  el.innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="${r[2]}">${r[1]}</td></tr>`).join('');
+  pressS=pts.length?sc:null;pressT=txt;finalVerdict();
+}
 function renderPressure(){
   const el=document.getElementById('press');if(!el||!candles.length)return;
+  if(isDex(symbol)){renderDexPressure();return;}
   const cs=candles,n=cs.length,px=cs[n-1].close,pts=[],rows=[];
   const clamp=v=>Math.max(-1,Math.min(1,v)),pct=v=>(v*100).toFixed(0)+'%',sg=v=>(v>=0?'+':'')+(v*100).toFixed(1)+'%';
   const cls=v=>v>0.05?'buy':v<-0.05?'sell':'neutral';
@@ -550,6 +599,14 @@ const jget=async u=>{const r=await fetch(u);if(!r.ok)throw new Error(r.status);r
 const okv=r=>r.status==='fulfilled'?r.value:null;
 async function loadDeriv(){
   const sym=symbol;
+  if(isDex(sym)){   // no futures market: only the market-wide context (BTC trend, Fear & Greed) plus pool stats
+    const [fg,btc]=(await Promise.allSettled([jget('https://api.alternative.me/fng/?limit=2'),klines('BTCUSDT','1d',250)])).map(okv);
+    if(sym!==symbol)return;
+    let btcTrend=null;
+    if(btc&&btc.length>200){const c=btc.map(x=>x.close),e50=ema(c,50),e200=ema(c,200),n=c.length-1;
+      btcTrend={dir:c[n]>e50[n]&&e50[n]>e200[n]?1:c[n]<e50[n]&&e50[n]<e200[n]?-1:0,chg7:(c[n]-c[n-7])/c[n-7]};}
+    deriv={dex:true,sym,fg:fg&&fg.data?fg.data:null,btcTrend};renderDeriv();return;
+  }
   const [pi,fr,oi,ls,top,tk,fg,btc]=(await Promise.allSettled([
     jget(`${FAPI}/fapi/v1/premiumIndex?symbol=${sym}`),
     jget(`${FAPI}/fapi/v1/fundingRate?symbol=${sym}&limit=21`),
@@ -566,8 +623,34 @@ async function loadDeriv(){
   deriv={sym,pi,fr,oi,ls,top,tk,fg:fg&&fg.data?fg.data:null,btcTrend};
   renderDeriv();
 }
+// context for DEX tokens: pool health (liquidity, volume, valuation) and market-wide mood
+function renderDexContext(){
+  const el=document.getElementById('deriv'),Dv=deriv,D=dexInfo,rows=[],votes=[];
+  const cls=v=>v>0.15?'buy':v<-0.15?'sell':'neutral',add=(l,t,v)=>rows.push([l,t,cls(v||0)]);
+  let note='';
+  if(D){
+    const liq=D.liquidity&&D.liquidity.usd,vol=D.volume&&D.volume.h24;
+    if(liq!=null){add('Pool liquidity',`$${fmtK(liq)}${liq<100e3?' · very thin':liq<500e3?' · thin':''}`,liq<100e3?-1:liq<500e3?-.4:0);
+      if(liq<500e3)note=`Thin liquidity: a $${fmtK(Math.round(liq*0.01))} order already moves price about 1%. Expect slippage, and use a small position.`;}
+    if(vol!=null){add('Volume, 24h',`$${fmtK(vol)}${liq?` (${(vol/liq).toFixed(1)}× liquidity)`:''}`,0);}
+    if(D.fdv)add('Fully diluted value',`$${fmtK(D.fdv)}${D.marketCap?` (market cap $${fmtK(D.marketCap)})`:''}`,0);
+    add('Pool',`${D.dexId} on ${D.chainId}, USDC pair`,0);
+  }else rows.push(['Pool data','loading…','neutral']);
+  rows.push(['Futures / funding / open interest','none (DEX token, no futures market)','neutral']);
+  if(Dv.btcTrend){const v=Dv.btcTrend.dir*.5;votes.push(v);
+    add('BTC trend (daily)',`${Dv.btcTrend.dir>0?'Up':Dv.btcTrend.dir<0?'Down':'Mixed'} (7d ${Dv.btcTrend.chg7>=0?'+':''}${(Dv.btcTrend.chg7*100).toFixed(1)}%)`,v);}
+  if(Dv.fg&&Dv.fg.length){const x=+Dv.fg[0].value,v=x<=20?.5:x>=80?-.5:0;votes.push(v);
+    add('Fear & Greed',`${x} · ${Dv.fg[0].value_classification}`,v);}
+  const sc=votes.length?votes.reduce((a,x)=>a+x,0)/votes.length:0;
+  const [txt,c]=!votes.length?['NO DATA','neutral']:sc>=.3?['BULLISH CONTEXT','buy']:sc>=.12?['LEANS BULLISH','buy']:sc<=-.3?['BEARISH CONTEXT','sell']:sc<=-.12?['LEANS BEARISH','sell']:['NEUTRAL','neutral'];
+  const v=document.getElementById('dVerdict');v.textContent=txt;v.className=c;
+  document.getElementById('dNote').textContent=note;
+  el.innerHTML=rows.map(r=>`<tr><td>${r[0]}</td><td class="${r[2]}">${r[1]}</td></tr>`).join('');
+  derivS=votes.length?sc:null;derivT=txt;finalVerdict();
+}
 function renderDeriv(){
   const el=document.getElementById('deriv');if(!el||!deriv||deriv.sym!==symbol)return;
+  if(deriv.dex){renderDexContext();return;}
   const D=deriv,rows=[],votes=[],clamp=v=>Math.max(-1,Math.min(1,v));
   const cls=v=>v>0.15?'buy':v<-0.15?'sell':'neutral',add=(l,t,v)=>rows.push([l,t,cls(v==null?0:v)]);
   // funding: positive = longs pay shorts (crowded longs), negative = shorts pay longs
@@ -625,28 +708,56 @@ setInterval(()=>{if(candles.length)loadDeriv()},60000);
 
 // ---------- data ----------
 const toC=k=>({time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5],tb:+k[9]||0}); // tb = taker-buy (aggressive buy) volume
+const GT='https://api.geckoterminal.com/api/v2';
+const DEX_TF={'5m':['minute',5],'15m':['minute',15],'1h':['hour',1],'4h':['hour',4],'1d':['day',1]};
+async function dexKlines(sym,interval,limit){
+  const m=DEX_TF[interval],d=DEX[sym];
+  if(!m)throw new Error('timeframe not available for this token');
+  const r=await fetch(`${GT}/networks/${d.net}/pools/${d.pool}/ohlcv/${m[0]}?aggregate=${m[1]}&limit=${Math.min(limit,1000)}&currency=usd&include_empty_intervals=true`);
+  if(!r.ok)throw new Error('HTTP '+r.status+(r.status===429?' (rate limit, retry in a minute)':''));
+  const list=(await r.json()).data.attributes.ohlcv_list;
+  return list.slice().reverse().map(k=>({time:k[0],open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5],tb:0}));
+}
 async function klines(sym,interval,limit=1000){
+  if(isDex(sym))return dexKlines(sym,interval,limit);
   const r=await fetch(`${restBase(sym)}/klines?symbol=${sym}&interval=${interval}&limit=${limit}`);
   if(!r.ok)throw new Error('HTTP '+r.status);return (await r.json()).map(toC);
 }
 async function load(){
   const conn=document.getElementById('conn');conn.textContent='loading…';
   try{ candles=await klines(symbol,tf); }catch(e){conn.textContent='data error: '+e.message;return;}
-  document.getElementById('lblMain').textContent=`${symbol} · ${tf}   (EMA20 yellow · EMA50 blue · EMA200 purple)`;
+  document.getElementById('lblMain').textContent=`${nice(symbol)} · ${tf}   (EMA20 yellow · EMA50 blue · EMA200 purple)`;
   autoFit(true); rsiFit(true); lastCat=null; lastPx=null; renderAll(); {const sc=score(ind,candles,candles.length-1);lastCat=sc>=BUY_T?'buy':sc<=-BUY_T?'sell':'neutral';} charts.forEach(c=>c.timeScale().scrollToRealTime&&0);
   chMain.timeScale().setVisibleLogicalRange({from:candles.length-120,to:candles.length+5});
   connect(); mtf(); pressS=null; derivS=null; startPressure(); deriv=null; loadDeriv();
   htf=null; {const s0=symbol,t0=tf; loadHtf(s0).then(h=>{if(s0===symbol&&t0===tf){htf=h;panel();}}).catch(()=>{});}
 }
+let dexPoll=null;
 function connect(){
   if(ws){ws.onclose=null;ws.close();}
+  clearInterval(dexPoll);
   const conn=document.getElementById('conn');
+  if(isDex(symbol)){   // no websocket for DEX pools: poll the last candles every 20s
+    conn.textContent='● live (updates every 20s)';conn.style.color='#26a69a';
+    const s0=symbol,t0=tf;
+    dexPoll=setInterval(async()=>{
+      if(s0!==symbol||t0!==tf||!candles.length)return;
+      try{for(const c of await klines(s0,t0,3)){
+        if(s0!==symbol||t0!==tf)return;
+        if(c.time>candles[candles.length-1].time)checkSignalAlert(candles.length-1);   // previous candle just closed
+        applyCandle(c,false);}}catch(e){}
+    },20000);
+    return;
+  }
   ws=new WebSocket(`${wsBase(symbol)}/${symbol.toLowerCase()}@kline_${tf}`);
   ws.onopen=()=>{conn.textContent='● live';conn.style.color='#26a69a'};
   ws.onclose=()=>{conn.textContent='reconnecting…';conn.style.color='#e0b341';setTimeout(connect,3000)};
-  ws.onmessage=e=>{
-    const k=JSON.parse(e.data).k, c=toC([k.t,k.o,k.h,k.l,k.c,k.v,0,0,0,k.V]);
+  ws.onmessage=e=>{const k=JSON.parse(e.data).k;applyCandle(toC([k.t,k.o,k.h,k.l,k.c,k.v,0,0,0,k.V]),k.x);};
+}
+// merge one live candle into the chart, indicators and panels
+function applyCandle(c,closed){
     const last=candles[candles.length-1];
+    if(c.time<last.time)return;
     if(c.time===last.time)candles[candles.length-1]=c; else candles.push(c);
     ind=compute(candles);
     const i=candles.length-1;
@@ -659,8 +770,7 @@ function connect(){
     u(sBu,ind.bb,b=>b.up);u(sBm,ind.bb,b=>b.mid);u(sBl,ind.bb,b=>b.lo);
     markers(); panel();
     checkPriceAlert(c.close);
-    if(k.x)checkSignalAlert(i);
-  };
+    if(closed)checkSignalAlert(i);
 }
 async function mtf(){
   const el=document.getElementById('mtf'); let html='';
@@ -786,7 +896,7 @@ async function backtestAll(){
     +`<tr><td colspan=4 class="note">Pullback beat Score on ${beat} of ${rows.length}; beat buy & hold on ${rows.filter(r=>r.b.ret>r.a.bh).length}. Pullback win rate (all trades): ${pc(pbWin/Math.max(1,pbTr))}.</td></tr>`:'')
     +(done?'':'<tr><td colspan=4 class="note">Running…</td></tr>');};
   draw(false);
-  for(const sym of SYMBOLS){
+  for(const sym of SYMBOLS.filter(s=>!isDex(s))){   // DEX tokens have too little history to backtest
     try{const cs=await klines(sym,tf,1000),hh=await loadHtf(sym),I=compute(cs);
       const a=runBT(cs,I,hh,o),b=runPB(cs,I,hh,o);
       rows.push({s:nice(sym).replace(/ \(.*\)$/,''),a,b});fs+=a.ret;us+=b.ret;bs+=a.bh;if(b.ret>a.ret)beat++;
