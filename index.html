@@ -406,7 +406,8 @@ function chartTargets(dir,px,risk,sr){
 }
 function panel(){
   const i=candles.length-1, cs=candles, px=cs[i].close;
-  if(ind.atr[i]==null||!ind.bb[i]){   // young tokens / short timeframes may not have enough candles yet
+  noHist=ind.atr[i]==null||!ind.bb[i];
+  if(noHist){   // young tokens / short timeframes may not have enough candles yet
     const v=document.getElementById('verdict');v.textContent='Not enough history';v.className='neutral';
     const f=document.getElementById('fVerdict');f.textContent='WAIT';f.className='neutral';
     document.getElementById('fWhy').textContent=`Only ${cs.length} candles on this timeframe, too few for the indicators. Try a shorter timeframe.`;
@@ -554,9 +555,14 @@ function renderPressure(){
 setInterval(renderPressure,2000);
 
 // ---------- final combined indication ----------
-let techS=0,pressS=null,derivS=null,pressT='',derivT='',qPass=null,plan0=null;
+let techS=0,pressS=null,derivS=null,pressT='',derivT='',qPass=null,plan0=null,noHist=false;
 function finalVerdict(){
   const el=document.getElementById('final');if(!el||!candles.length)return;
+  if(noHist){   // too few candles for the indicators: never show a stale call
+    const f=document.getElementById('fVerdict');f.textContent='WAIT';f.className='neutral';
+    document.getElementById('fWhy').textContent=`Only ${candles.length} candles on this timeframe, too few for the indicators. Try a shorter timeframe.`;
+    el.innerHTML='';return;
+  }
   const cl=(v,k)=>Math.max(-1,Math.min(1,v/k));
   // [name, score, "lean" threshold, "strong" level, label, weight]
   const L=[['Technical signal',techS,.3,.6,label(techS)[0],.4],['Buy / sell pressure',pressS,.2,.5,pressT,.3],['Derivatives & context',derivS,.12,.3,derivT,.3]];
@@ -710,12 +716,32 @@ setInterval(()=>{if(candles.length)loadDeriv()},60000);
 const toC=k=>({time:Math.floor(k[0]/1000),open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5],tb:+k[9]||0}); // tb = taker-buy (aggressive buy) volume
 const GT='https://api.geckoterminal.com/api/v2';
 const DEX_TF={'5m':['minute',5],'15m':['minute',15],'1h':['hour',1],'4h':['hour',4],'1d':['day',1]};
+// GeckoTerminal's free tier allows ~30 requests/min and its 429 reply has no CORS header (browser shows
+// "Failed to fetch"). So: one request at a time, 2.2s apart, cached, de-duplicated, with retries.
+const gtCache=new Map(),gtPending=new Map();let gtChain=Promise.resolve(),gtLast=0;
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+function gtFetch(url,ttl){
+  const hit=gtCache.get(url);if(hit&&Date.now()-hit.t<ttl)return Promise.resolve(hit.v);
+  if(gtPending.has(url))return gtPending.get(url);
+  const run=async()=>{
+    for(let a=0;a<3;a++){
+      const wait=gtLast+2200-Date.now();if(wait>0)await sleep(wait);
+      gtLast=Date.now();
+      try{const r=await fetch(url);if(r.ok){const v=await r.json();gtCache.set(url,{t:Date.now(),v});return v;}}catch(e){}
+      await sleep(4000*(a+1));
+    }
+    throw new Error('rate limited by GeckoTerminal, retrying shortly');
+  };
+  const p=gtChain.then(run,run);gtChain=p.catch(()=>{});
+  gtPending.set(url,p);p.then(()=>gtPending.delete(url),()=>gtPending.delete(url));
+  return p;
+}
 async function dexKlines(sym,interval,limit){
   const m=DEX_TF[interval],d=DEX[sym];
   if(!m)throw new Error('timeframe not available for this token');
-  const r=await fetch(`${GT}/networks/${d.net}/pools/${d.pool}/ohlcv/${m[0]}?aggregate=${m[1]}&limit=${Math.min(limit,1000)}&currency=usd&include_empty_intervals=true`);
-  if(!r.ok)throw new Error('HTTP '+r.status+(r.status===429?' (rate limit, retry in a minute)':''));
-  const list=(await r.json()).data.attributes.ohlcv_list;
+  const url=`${GT}/networks/${d.net}/pools/${d.pool}/ohlcv/${m[0]}?aggregate=${m[1]}&limit=${Math.min(limit,1000)}&currency=usd&include_empty_intervals=true`;
+  // live polls (3 candles) cache 15s, full loads 60s, multi-timeframe checks ~3 min
+  const list=(await gtFetch(url,limit<=3?15e3:limit>=1000?60e3:170e3)).data.attributes.ohlcv_list;
   return list.slice().reverse().map(k=>({time:k[0],open:+k[1],high:+k[2],low:+k[3],close:+k[4],volume:+k[5],tb:0}));
 }
 async function klines(sym,interval,limit=1000){
@@ -723,9 +749,18 @@ async function klines(sym,interval,limit=1000){
   const r=await fetch(`${restBase(sym)}/klines?symbol=${sym}&interval=${interval}&limit=${limit}`);
   if(!r.ok)throw new Error('HTTP '+r.status);return (await r.json()).map(toC);
 }
+let loadSeq=0;
 async function load(){
-  const conn=document.getElementById('conn');conn.textContent='loading…';
-  try{ candles=await klines(symbol,tf); }catch(e){conn.textContent='data error: '+e.message;return;}
+  const conn=document.getElementById('conn'),my=++loadSeq;conn.textContent='loading…';
+  let cs;
+  try{ cs=await klines(symbol,tf); }
+  catch(e){
+    conn.textContent='data error: '+e.message;
+    if(isDex(symbol))setTimeout(()=>{if(my===loadSeq)load()},15000);   // DEX data comes from a rate-limited free API: retry
+    return;
+  }
+  if(my!==loadSeq)return;   // user switched coin/timeframe while this was loading
+  candles=cs;
   document.getElementById('lblMain').textContent=`${nice(symbol)} · ${tf}   (EMA20 yellow · EMA50 blue · EMA200 purple)`;
   autoFit(true); rsiFit(true); lastCat=null; lastPx=null; renderAll(); {const sc=score(ind,candles,candles.length-1);lastCat=sc>=BUY_T?'buy':sc<=-BUY_T?'sell':'neutral';} charts.forEach(c=>c.timeScale().scrollToRealTime&&0);
   chMain.timeScale().setVisibleLogicalRange({from:candles.length-120,to:candles.length+5});
